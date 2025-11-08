@@ -16,27 +16,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            ext: ""
-          - goos: linux
-            goarch: arm64
-            ext: ""
-          - goos: windows
-            goarch: amd64
-            ext: .exe
-          - goos: darwin
-            goarch: amd64
-            ext: ""
-          - goos: darwin
-            goarch: arm64
-            ext: ""
-          - goos: freebsd
-            goarch: amd64
-            ext: ""
-          - goos: netbsd
-            goarch: amd64
-            ext: ""
+          - { goos: linux,   goarch: amd64, ext: "" }
+          - { goos: linux,   goarch: arm64, ext: "" }
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: darwin,  goarch: amd64, ext: "" }
+          - { goos: darwin,  goarch: arm64, ext: "" }
+          - { goos: freebsd, goarch: amd64, ext: "" }
+          - { goos: netbsd,  goarch: amd64, ext: "" }
 
     env:
       CGO_ENABLED: 0
@@ -44,21 +30,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22.x'
+          cache: false              # убрать шум "Restore cache failed"
 
-      - name: Ensure go.mod exists
+      - name: Ensure go.mod / go.sum
+        shell: bash
         run: |
           if [ ! -f go.mod ]; then
             go mod init "github.com/${GITHUB_REPOSITORY}"
           fi
-          go mod tidy || true
+          go mod tidy || true       # создаст go.sum при наличии зависимостей
 
       - name: Meta
         id: meta
+        shell: bash
         run: |
           BIN="check_domain"
           OS="${{ matrix.goos }}"
@@ -66,7 +59,7 @@ jobs:
           EXT="${{ matrix.ext }}"
           OUTDIR="dist"
           FILENAME="${BIN}-${OS}-${ARCH}${EXT}"
-          echo "bin=$BIN" >> $GITHUB_OUTPUT
+          echo "bin=$BIN"       >> $GITHUB_OUTPUT
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "outdir=$OUTDIR" >> $GITHUB_OUTPUT
 
@@ -76,10 +69,12 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p "${{ steps.meta.outputs.outdir }}"
-          # при желании проброс версии: -ldflags "-s -w -X main.version=stable"
-          go build -trimpath -ldflags "-s -w" -o "${{ steps.meta.outputs.outdir }}/${{ steps.meta.outputs.filename }}" .
+          # при желании: -ldflags "-s -w -X main.version=stable"
+          go build -trimpath -ldflags "-s -w" \
+            -o "${{ steps.meta.outputs.outdir }}/${{ steps.meta.outputs.filename }}" .
 
       - name: Checksums
+        shell: bash
         run: |
           cd "${{ steps.meta.outputs.outdir }}"
           sha256sum "${{ steps.meta.outputs.filename }}" > "${{ steps.meta.outputs.filename }}.sha256"
@@ -98,10 +93,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (for tagging)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set git identity (local)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Move 'stable' tag to current commit
         run: |
@@ -112,9 +114,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: true   # ВСЕ файлы в одну папку dist/
+          merge-multiple: true
 
-      # Один вызов, один непересекающийся шаблон -> без дублей
       - name: Create/Update GitHub Release (tag=stable)
         uses: softprops/action-gh-release@v2
         with:
@@ -124,7 +125,7 @@ jobs:
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
-          files: dist/*
+          files: dist/*          # один непересекающийся шаблон → без дублей
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
