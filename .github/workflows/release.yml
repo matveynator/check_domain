@@ -48,52 +48,38 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.x'   # <-- больше не зависит от go.mod
+          go-version: '1.22.x'
 
-      # Если в репозитории нет go.mod — создаём минимальный модуль автоматически
       - name: Ensure go.mod exists
-        shell: bash
         run: |
           if [ ! -f go.mod ]; then
-            MOD="github.com/${GITHUB_REPOSITORY}"
-            go mod init "$MOD"
+            go mod init "github.com/${GITHUB_REPOSITORY}"
           fi
-          # На случай наличия зависимостей:
           go mod tidy || true
 
       - name: Meta
         id: meta
-        shell: bash
         run: |
-          TS=$(date -u +'%Y.%m.%d-%H%M')
-          SHORT_SHA=${GITHUB_SHA::7}
-          TAG="v${TS}+${SHORT_SHA}"
           BIN="check_domain"
           OS="${{ matrix.goos }}"
           ARCH="${{ matrix.goarch }}"
           EXT="${{ matrix.ext }}"
           OUTDIR="dist"
           FILENAME="${BIN}-${OS}-${ARCH}${EXT}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "bin=$BIN" >> $GITHUB_OUTPUT
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "outdir=$OUTDIR" >> $GITHUB_OUTPUT
 
-      # Если файл у вас не в корне, а в cmd/check_domain/main.go —
-      # добавьте: -C ./cmd/check_domain и путь в -o оставьте как есть
       - name: Build ${{ matrix.goos }}_${{ matrix.goarch }}
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p "${{ steps.meta.outputs.outdir }}"
-          # Пропишите версию в бинарь при желании:
-          # LD="-s -w -X main.version=${{ steps.meta.outputs.tag }}"
-          LD="-s -w"
-          go build -trimpath -ldflags "$LD" -o "${{ steps.meta.outputs.outdir }}/${{ steps.meta.outputs.filename }}" .
+          # при желании проброс версии: -ldflags "-s -w -X main.version=stable"
+          go build -trimpath -ldflags "-s -w" -o "${{ steps.meta.outputs.outdir }}/${{ steps.meta.outputs.filename }}" .
 
       - name: Checksums
-        shell: bash
         run: |
           cd "${{ steps.meta.outputs.outdir }}"
           sha256sum "${{ steps.meta.outputs.filename }}" > "${{ steps.meta.outputs.filename }}.sha256"
@@ -108,37 +94,37 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
     if: contains(github.event.head_commit.message, 'stable release')
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Download all artifacts
+      - name: Checkout (for tagging)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Move 'stable' tag to current commit
+        run: |
+          git tag -fa stable -m "stable release"
+          git push -f origin stable
+
+      - name: Download artifacts (flatten)
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
+          merge-multiple: true   # ВСЕ файлы в одну папку dist/
 
-      - name: Derive tag (same as build)
-        id: meta
-        run: |
-          TS=$(date -u +'%Y.%m.%d-%H%M')
-          SHORT_SHA=${GITHUB_SHA::7}
-          TAG="v${TS}+${SHORT_SHA}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release (raw binaries)
+      # Один вызов, один непересекающийся шаблон -> без дублей
+      - name: Create/Update GitHub Release (tag=stable)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: Stable release ${{ steps.meta.outputs.tag }}
-          body: |
-            Automated stable release from commit:
-            ${{ github.event.head_commit.message }}
+          tag_name: stable
+          name: Stable
+          make_latest: true
           draft: false
           prerelease: false
-          files: |
-            artifacts/**/*.exe
-            artifacts/**/check_domain-*
-            artifacts/**/*.sha256
+          fail_on_unmatched_files: true
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
