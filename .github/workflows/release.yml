@@ -1,0 +1,128 @@
+name: Stable multi-OS release
+
+on:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: contains(github.event.head_commit.message, 'stable release')
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: freebsd
+            goarch: amd64
+            ext: ""
+          - goos: netbsd
+            goarch: amd64
+            ext: ""
+
+    env:
+      CGO_ENABLED: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Compute meta
+        id: meta
+        shell: bash
+        run: |
+          TS=$(date -u +'%Y.%m.%d-%H%M')
+          SHORT_SHA=${GITHUB_SHA::7}
+          TAG="v${TS}+${SHORT_SHA}"
+          BIN="check_domain"
+          OS="${{ matrix.goos }}"
+          ARCH="${{ matrix.goarch }}"
+          EXT="${{ matrix.ext }}"
+          OUTDIR="dist"
+          FILENAME="${BIN}-${OS}-${ARCH}${EXT}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "bin=$BIN" >> $GITHUB_OUTPUT
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "outdir=$OUTDIR" >> $GITHUB_OUTPUT
+
+      - name: Build ${{ matrix.goos }}_${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p "${{ steps.meta.outputs.outdir }}"
+          # Проброс версии внутрь бинарника (если в коде var version string):
+          # go build -trimpath -ldflags "-s -w -X main.version=${{ steps.meta.outputs.tag }}" -o ...
+          go build -trimpath -ldflags "-s -w" -o "${{ steps.meta.outputs.outdir }}/${{ steps.meta.outputs.filename }}" .
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd "${{ steps.meta.outputs.outdir }}"
+          sha256sum "${{ steps.meta.outputs.filename }}" > "${{ steps.meta.outputs.filename }}.sha256"
+
+      - name: Upload artifacts (raw binaries)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ steps.meta.outputs.outdir }}/${{ steps.meta.outputs.filename }}
+            ${{ steps.meta.outputs.outdir }}/${{ steps.meta.outputs.filename }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.message, 'stable release')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Derive tag (same as build)
+        id: meta
+        run: |
+          TS=$(date -u +'%Y.%m.%d-%H%M')
+          SHORT_SHA=${GITHUB_SHA::7}
+          TAG="v${TS}+${SHORT_SHA}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release with raw binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Stable release ${{ steps.meta.outputs.tag }}
+          body: |
+            Automated stable release from commit:
+            ${{ github.event.head_commit.message }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
