@@ -19,19 +19,7 @@ import (
 	"time"
 )
 
-const version = "2.0.0-go"
-
-// ---- CLI flags ----
-var (
-	flagDomain    string
-	flagWarnDays  int
-	flagCritDays  int
-	flagWhoisPath string
-	flagServer    string
-	flagCacheAge  int    // days
-	flagCacheDir  string // dir
-	flagTimeout   int    // seconds (network + whois)
-)
+const version = "2.1.1-go-stable"
 
 const (
 	STATE_OK       = 0
@@ -40,7 +28,18 @@ const (
 	STATE_UNKNOWN  = 3
 )
 
-// ---- RDAP bootstrap (IANA) ----
+var (
+	flagDomain    string
+	flagWarnDays  int
+	flagCritDays  int
+	flagWhoisPath string
+	flagServer    string
+	flagCacheAge  int
+	flagCacheDir  string
+	flagTimeout   int
+)
+
+// ---------- RDAP bootstrap (IANA) ----------
 
 type ianaBootstrap struct {
 	Services [][]interface{} `json:"services"`
@@ -63,9 +62,7 @@ type rdapEntity struct {
 	Raw        json.RawMessage `json:"-"`
 }
 
-// Extract "fn" (name) from vcardArray if present
 func (e rdapEntity) Name() string {
-	// vcardArray format: ["vcard", [ [ "fn", {}, "text", "Registrar Name"], ... ] ]
 	if len(e.VCardArray) != 2 {
 		return ""
 	}
@@ -88,7 +85,17 @@ func (e rdapEntity) Name() string {
 	return ""
 }
 
-// ---- Utilities ----
+// ---------- Defaults for problematic TLDs (RDAP/WHOIS) ----------
+
+var tldDefaultRDAP = map[string]string{
+	"co": "https://rdap.nic.co",
+}
+
+var tldDefaultWHOIS = map[string]string{
+	"co": "whois.nic.co",
+}
+
+// ---------- Utils ----------
 
 func die(rc int, msg string) {
 	fmt.Println(msg)
@@ -112,8 +119,15 @@ func setDefaults() {
 	}
 }
 
-// ---- Cache helpers ----
+func tldOf(domain string) (string, error) {
+	labels := strings.Split(strings.TrimSpace(strings.ToLower(domain)), ".")
+	if len(labels) < 2 {
+		return "", errors.New("bad domain")
+	}
+	return labels[len(labels)-1], nil
+}
 
+// cache helpers
 func isFresh(path string, maxAgeDays int) bool {
 	if maxAgeDays <= 0 {
 		return false
@@ -131,10 +145,7 @@ func readIfFresh(path string, maxAgeDays int) ([]byte, bool) {
 		return nil, false
 	}
 	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false
-	}
-	if len(b) == 0 {
+	if err != nil || len(b) == 0 {
 		return nil, false
 	}
 	return b, true
@@ -146,9 +157,8 @@ func writeFileAtomic(path string, data []byte) {
 	_ = os.Rename(tmp, path)
 }
 
-// ---- HTTP client ----
+// HTTP client
 func httpClient(timeoutSec int) *http.Client {
-	// Conservative timeouts; no proxies by default.
 	return &http.Client{
 		Timeout: time.Duration(timeoutSec) * time.Second,
 		Transport: &http.Transport{
@@ -164,16 +174,7 @@ func httpClient(timeoutSec int) *http.Client {
 	}
 }
 
-// ---- RDAP logic ----
-
-func tldOf(domain string) (string, error) {
-	labels := strings.Split(strings.TrimSpace(strings.ToLower(domain)), ".")
-	if len(labels) < 2 {
-		return "", errors.New("bad domain")
-	}
-	return labels[len(labels)-1], nil
-}
-
+// RDAP bootstrap
 func rdapBootstrapPath(cacheDir string) string {
 	if cacheDir == "" {
 		return ""
@@ -193,9 +194,7 @@ func fetchIANAbootstrap(cacheDir string, cacheAgeDays int, timeoutSec int) (*ian
 			}
 		}
 	}
-	// fetch fresh
-	url := "https://data.iana.org/rdap/dns.json"
-	resp, err := httpClient(timeoutSec).Get(url)
+	resp, err := httpClient(timeoutSec).Get("https://data.iana.org/rdap/dns.json")
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +223,6 @@ func rdapServersForTLD(boot *ianaBootstrap, tld string) []string {
 		if len(svc) < 2 {
 			continue
 		}
-		// first element is slice of TLDs, second is slice of base URLs
 		left, _ := svc[0].([]interface{})
 		right, _ := svc[1].([]interface{})
 		match := false
@@ -247,7 +245,6 @@ func rdapServersForTLD(boot *ianaBootstrap, tld string) []string {
 }
 
 func rdapFetchDomain(base, domain string, timeoutSec int) ([]byte, *http.Response, error) {
-	// RFC: domain path is /domain/<fqdn>
 	url := fmt.Sprintf("%s/domain/%s", strings.TrimRight(base, "/"), domain)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Accept", "application/rdap+json, application/json;q=0.9, */*;q=0.1")
@@ -268,7 +265,6 @@ func parseRDAPExpiration(body []byte) (time.Time, string, error) {
 	if err := json.Unmarshal(body, &d); err != nil {
 		return time.Time{}, "", err
 	}
-	// find expiration event
 	var exp time.Time
 	for _, ev := range d.Events {
 		a := strings.ToLower(ev.Action)
@@ -278,7 +274,6 @@ func parseRDAPExpiration(body []byte) (time.Time, string, error) {
 			}
 		}
 	}
-	// registrar (if present)
 	var registrar string
 	for _, ent := range d.Entities {
 		for _, r := range ent.Roles {
@@ -302,7 +297,7 @@ func parseRDAPExpiration(body []byte) (time.Time, string, error) {
 	return exp, registrar, nil
 }
 
-// ---- WHOIS fallback ----
+// ---------- WHOIS fallback ----------
 
 type whoisConfig struct {
 	Path   string
@@ -326,7 +321,6 @@ func runWhois(cfg whoisConfig, domain string) ([]byte, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
-	// crude timeout via goroutine
 	errCh := make(chan error, 1)
 	go func() { errCh <- cmd.Run() }()
 	select {
@@ -341,29 +335,22 @@ func runWhois(cfg whoisConfig, domain string) ([]byte, error) {
 	}
 }
 
-// A set of practical regexes for dates as seen in the wild.
+// Паттерны для WHOIS
 var dateParsers = []struct {
 	re   *regexp.Regexp
-	keep int // index of the group to keep
+	keep int
 }{
-	// ISO-like first
-	{regexp.MustCompile(`(?i)\b(Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expiry Date|Expire Date|paid-till|expire|expires|renewal date|Expired|Expiration Time)\s*[:]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\b`), 2},
-	{regexp.MustCompile(`(?i)\b(Expiry date)\s*[:]\s*([0-9]{4}/[0-9]{2}/[0-9]{2})\b`), 2},
-	{regexp.MustCompile(`(?i)\b(Expiration date|expire|paid-till)\s*[:]\s*([0-9]{4}\.[0-9]{2}\.[0-9]{2})\b`), 2},
-	// With time -> take date part
-	{regexp.MustCompile(`(?i)\b(Expiration Date|Expiry Date|Expired|Expiration Time|expires|paid-till)\s*[:]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})[ T]([0-9]{2}:[0-9]{2}:[0-9]{2})`), 2},
-	{regexp.MustCompile(`(?i)\b(Expiration Date|Expiry Date|Expired|Expiration Time|expires|paid-till)\s*[:]\s*([0-9]{4}\.[0-9]{2}\.[0-9]{2})[ T]([0-9]{2}:[0-9]{2}:[0-9]{2})`), 2},
-	{regexp.MustCompile(`(?i)\b(Expiration Date|Expiry Date|Expired|Expiration Time|expires)\s*[:]\s*([0-9]{4}/[0-9]{2}/[0-9]{2})[ T]([0-9]{2}:[0-9]{2}:[0-9]{2})`), 2},
-	// dd-mon-YYYY
-	{regexp.MustCompile(`(?i)\b(Expiration Date|Expiry Date|Expire Date)\s*[:]\s*([0-9]{2})-([A-Za-z]{3})-([0-9]{4})`), 0},
-	// dd.mm.yyyy
-	{regexp.MustCompile(`(?i)\b(expiration date|expire|expires|paid-till)\s*[:]\s*([0-9]{2})\.([0-9]{2})\.([0-9]{4})`), 0},
-	// dd/mm/yyyy
-	{regexp.MustCompile(`(?i)\b(Expiry Date|expires at)\s*[:]\s*([0-9]{2})/([0-9]{2})/([0-9]{4})`), 0},
-	// yyyymmdd
-	{regexp.MustCompile(`(?i)\b(expires)\s*[:]\s*([0-9]{4})([0-9]{2})([0-9]{2})\b`), 0},
-	// Day Mon DD HH:MM:SS TZ YYYY
-	{regexp.MustCompile(`(?i)\b(Expiration Date|Domain Expiration Date)\s*[:]\s*[A-Za-z]{3}\s+([A-Za-z]{3})\s+([0-9]{2})\s+[0-9: ]+\s+[A-Z]+\s+([0-9]{4})`), 0},
+	// ISO (берём только YYYY-MM-DD, остальное игнорируем)
+	{regexp.MustCompile(`(?i)\bRegistry\s+Expiry\s+Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[ T].*)?`), 1},
+	{regexp.MustCompile(`(?i)\bRegistrar\s+Registration\s+Expiration\s+Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[ T].*)?`), 1},
+	{regexp.MustCompile(`(?i)\b(Expiration|Expiry|Expire)\s*(Date|Time)?\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[ T].*)?`), 3},
+	{regexp.MustCompile(`(?i)\bpaid-till\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})(?:[ T].*)?`), 1},
+
+	// Остальные — вручную
+	{regexp.MustCompile(`(?i)\b(Expiration|Expiry|Expire)\s*(Date|Time)?\s*:\s*([0-9]{2})-([A-Za-z]{3})-([0-9]{4})`), 0}, // dd-mon-YYYY
+	{regexp.MustCompile(`(?i)\b(Expiration|Expiry|Expire|paid-till)\s*:\s*([0-9]{2})\.([0-9]{2})\.([0-9]{4})`), 0},    // dd.mm.yyyy
+	{regexp.MustCompile(`(?i)\b(Expiration|Expiry|Expire)\s*:\s*([0-9]{2})/([0-9]{2})/([0-9]{4})`), 0},               // dd/mm/yyyy
+	{regexp.MustCompile(`(?i)\bexpires\s*:\s*([0-9]{4})([0-9]{2})([0-9]{2})\b`), 0},                                  // yyyymmdd
 }
 
 var mon = map[string]time.Month{
@@ -373,56 +360,41 @@ var mon = map[string]time.Month{
 
 func parseDateFlex(s string) (time.Time, bool) {
 	s = strings.TrimSpace(s)
-
-	// Try strict YYYY-MM-DD
+	// YYYY-MM-DD
 	if m := regexp.MustCompile(`^([0-9]{4})-([0-9]{2})-([0-9]{2})$`).FindStringSubmatch(s); m != nil {
-		y := atoi(m[1])
-		M := atoi(m[2])
-		d := atoi(m[3])
+		y, M, d := atoi(m[1]), atoi(m[2]), atoi(m[3])
 		return time.Date(y, time.Month(M), d, 0, 0, 0, 0, time.UTC), true
 	}
 	// YYYY.MM.DD
 	if m := regexp.MustCompile(`^([0-9]{4})\.([0-9]{2})\.([0-9]{2})$`).FindStringSubmatch(s); m != nil {
-		y := atoi(m[1])
-		M := atoi(m[2])
-		d := atoi(m[3])
+		y, M, d := atoi(m[1]), atoi(m[2]), atoi(m[3])
 		return time.Date(y, time.Month(M), d, 0, 0, 0, 0, time.UTC), true
 	}
 	// YYYY/MM/DD
 	if m := regexp.MustCompile(`^([0-9]{4})/([0-9]{2})/([0-9]{2})$`).FindStringSubmatch(s); m != nil {
-		y := atoi(m[1])
-		M := atoi(m[2])
-		d := atoi(m[3])
+		y, M, d := atoi(m[1]), atoi(m[2]), atoi(m[3])
 		return time.Date(y, time.Month(M), d, 0, 0, 0, 0, time.UTC), true
 	}
 	// dd-mon-YYYY
 	if m := regexp.MustCompile(`^([0-9]{2})-([A-Za-z]{3})-([0-9]{4})$`).FindStringSubmatch(s); m != nil {
-		d := atoi(m[1])
-		monStr := strings.ToLower(m[2])
-		y := atoi(m[3])
+		d, monStr, y := atoi(m[1]), strings.ToLower(m[2]), atoi(m[3])
 		if mm, ok := mon[monStr]; ok {
 			return time.Date(y, mm, d, 0, 0, 0, 0, time.UTC), true
 		}
 	}
 	// dd.mm.yyyy
 	if m := regexp.MustCompile(`^([0-9]{2})\.([0-9]{2})\.([0-9]{4})$`).FindStringSubmatch(s); m != nil {
-		d := atoi(m[1])
-		M := atoi(m[2])
-		y := atoi(m[3])
+		d, M, y := atoi(m[1]), atoi(m[2]), atoi(m[3])
 		return time.Date(y, time.Month(M), d, 0, 0, 0, 0, time.UTC), true
 	}
 	// dd/mm/yyyy
 	if m := regexp.MustCompile(`^([0-9]{2})/([0-9]{2})/([0-9]{4})$`).FindStringSubmatch(s); m != nil {
-		d := atoi(m[1])
-		M := atoi(m[2])
-		y := atoi(m[3])
+		d, M, y := atoi(m[1]), atoi(m[2]), atoi(m[3])
 		return time.Date(y, time.Month(M), d, 0, 0, 0, 0, time.UTC), true
 	}
 	// yyyymmdd
 	if m := regexp.MustCompile(`^([0-9]{4})([0-9]{2})([0-9]{2})$`).FindStringSubmatch(s); m != nil {
-		y := atoi(m[1])
-		M := atoi(m[2])
-		d := atoi(m[3])
+		y, M, d := atoi(m[1]), atoi(m[2]), atoi(m[3])
 		return time.Date(y, time.Month(M), d, 0, 0, 0, 0, time.UTC), true
 	}
 	return time.Time{}, false
@@ -439,61 +411,75 @@ func atoi(s string) int {
 }
 
 func parseWhoisExpiration(whoisText string) (time.Time, error) {
-	lines := strings.Split(whoisText, "\n")
-	// First try direct regex matches
+	// 1) точечные «ISO» группы
 	for _, pat := range dateParsers {
 		m := pat.re.FindStringSubmatch(whoisText)
-		if m != nil {
-			switch pat.keep {
-			case 2:
-				if t, ok := parseDateFlex(m[2]); ok {
-					return t, nil
-				}
-			case 0:
-				// reconstruct depending on pattern
-				// We handle in subsequent code with line scanning
-			}
-		}
-	}
-	// Line-by-line flexible attempts
-	for _, ln := range lines {
-		low := strings.ToLower(ln)
-		if !strings.Contains(low, "expir") && !strings.Contains(low, "paid-till") && !strings.Contains(low, "valid-date") && !strings.Contains(low, "expire-date") && !strings.Contains(low, "renewal date") {
+		if m == nil {
 			continue
 		}
-		// Extract probable date token(s)
-		clean := strings.TrimSpace(strings.Trim(strings.SplitN(ln, ":", 2)[len(strings.SplitN(ln, ":", 2))-1], "\r"))
-		clean = strings.TrimSpace(clean)
-		// take first token that looks date-ish
-		toks := strings.Fields(clean)
-		for _, tok := range toks {
-			if t, ok := parseDateFlex(tok); ok {
+		switch pat.keep {
+		case 1, 2, 3, 4, 5:
+			if t, ok := parseDateFlex(m[pat.keep]); ok {
 				return t, nil
 			}
-			// dd-mon-YYYY glued with time
-			if i := strings.Index(tok, "T"); i > 0 {
+		case 0:
+			// разбираем ниже
+		}
+	}
+
+	// 2) общий проход по строкам с «expir|paid-till|renewal»
+	lines := strings.Split(whoisText, "\n")
+	for _, ln := range lines {
+		low := strings.ToLower(ln)
+		if !(strings.Contains(low, "expir") ||
+			strings.Contains(low, "paid-till") ||
+			strings.Contains(low, "valid-date") ||
+			strings.Contains(low, "expire-date") ||
+			strings.Contains(low, "renewal")) {
+			continue
+		}
+		clean := ln
+		if idx := strings.Index(clean, ":"); idx >= 0 && idx+1 < len(clean) {
+			clean = clean[idx+1:]
+		}
+		clean = strings.TrimSpace(strings.Trim(clean, "\r"))
+		// токены
+		toks := strings.Fields(clean)
+		for _, tok := range toks {
+			// отрезаем время/таймзону
+			if i := strings.IndexAny(tok, "T "); i > 0 {
 				if t, ok := parseDateFlex(tok[:i]); ok {
 					return t, nil
 				}
 			}
-		}
-		// try whole line
-		for _, tok := range []string{clean} {
 			if t, ok := parseDateFlex(tok); ok {
 				return t, nil
 			}
 		}
+		// попробовать целиком
+		if t, ok := parseDateFlex(clean); ok {
+			return t, nil
+		}
 	}
-	// Some registries put "No match" or "NOT FOUND"
-	if strings.Contains(strings.ToUpper(whoisText), "NO MATCH") ||
-		strings.Contains(strings.ToUpper(whoisText), "NOT FOUND") ||
-		strings.Contains(strings.ToUpper(whoisText), "NO DOMAIN") {
+
+	// 3) «супер-липкий» глобальный поиск: любая дата после ключа expir*
+	reSticky := regexp.MustCompile(`(?is)expir[\w\s:/-]*?([0-9]{4}[-./][0-9]{2}[-./][0-9]{2})`)
+	if m := reSticky.FindStringSubmatch(whoisText); m != nil {
+		// нормализуем разделители в YYYY-MM-DD
+		date := strings.NewReplacer(".", "-", "/", "-").Replace(m[1])
+		if t, ok := parseDateFlex(date); ok {
+			return t, nil
+		}
+	}
+
+	// «не найден»?
+	up := strings.ToUpper(whoisText)
+	if strings.Contains(up, "NO MATCH") || strings.Contains(up, "NOT FOUND") || strings.Contains(up, "NO DOMAIN") {
 		return time.Time{}, errors.New("domain does not exist")
 	}
 	return time.Time{}, errors.New("unable to parse WHOIS expiration")
 }
 
-// rough registrar fetch from WHOIS (best effort)
 func parseWhoisRegistrar(whoisText string) string {
 	for _, key := range []string{"Registrar:", "registrar:", "Sponsoring Registrar:"} {
 		if i := strings.Index(whoisText, key); i >= 0 {
@@ -507,24 +493,22 @@ func parseWhoisRegistrar(whoisText string) string {
 	return ""
 }
 
-// ---- Main check flow ----
+// ---------- Main check flow ----------
 
 type result struct {
 	Exp       time.Time
 	Registrar string
-	Source    string // RDAP or WHOIS
+	Source    string // RDAP | WHOIS
 }
 
 func check(domain string) (result, error) {
-	// 1) RDAP via IANA bootstrap
 	var res result
-	boot, err := fetchIANAbootstrap(flagCacheDir, flagCacheAge, flagTimeout)
-	if err == nil {
-		if tld, e2 := tldOf(domain); e2 == nil {
-			servers := rdapServersForTLD(boot, tld)
-			// Try servers in order
+
+	// 1) RDAP via IANA
+	if boot, err := fetchIANAbootstrap(flagCacheDir, flagCacheAge, flagTimeout); err == nil {
+		if t, e2 := tldOf(domain); e2 == nil {
+			servers := rdapServersForTLD(boot, t)
 			for _, base := range servers {
-				// Cache per-domain RDAP if requested
 				cachePath := ""
 				if flagCacheDir != "" {
 					cachePath = filepath.Join(flagCacheDir, "rdap_"+strings.ReplaceAll(domain, ".", "_")+".json")
@@ -557,11 +541,30 @@ func check(domain string) (result, error) {
 			}
 		}
 	}
+
+	// 1a) RDAP fallback by TLD defaults (e.g., .co)
+	if t, e2 := tldOf(domain); e2 == nil {
+		if base, ok := tldDefaultRDAP[strings.ToLower(t)]; ok {
+			if b, _, err := rdapFetchDomain(base, domain, flagTimeout); err == nil && len(b) > 0 {
+				if exp, reg, err := parseRDAPExpiration(b); err == nil && !exp.IsZero() {
+					return result{Exp: exp.UTC(), Registrar: reg, Source: "RDAP"}, nil
+				}
+			}
+		}
+	}
+
 	// 2) WHOIS fallback
 	cfg := whoisConfig{
 		Path:   flagWhoisPath,
 		Server: flagServer,
 		TO:     time.Duration(flagTimeout) * time.Second,
+	}
+	if cfg.Server == "" {
+		if t, e2 := tldOf(domain); e2 == nil {
+			if def, ok := tldDefaultWHOIS[strings.ToLower(t)]; ok {
+				cfg.Server = def
+			}
+		}
 	}
 
 	var whoisText string
@@ -592,10 +595,9 @@ func check(domain string) (result, error) {
 	return res, nil
 }
 
-// ---- main ----
+// ---------- main ----------
 
 func main() {
-	// Support both short and GNU-like options
 	showHelp := false
 	showVersion := false
 
@@ -643,8 +645,8 @@ func main() {
 	now := time.Now().UTC()
 	diff := res.Exp.Sub(now)
 	days := int(diff.Hours() / 24)
-
 	expDate := res.Exp.Format("2006-01-02")
+
 	info := ""
 	if res.Registrar != "" {
 		info = " " + res.Registrar
@@ -654,7 +656,6 @@ func main() {
 		prefix = res.Source + " - "
 	}
 
-	// Not expired yet
 	if days >= 0 {
 		if days < flagCritDays {
 			die(STATE_CRITICAL, fmt.Sprintf("CRITICAL - %sDomain %s will expire in %d days (%s).%s", prefix, flagDomain, days, expDate, info))
@@ -665,7 +666,6 @@ func main() {
 		die(STATE_OK, fmt.Sprintf("OK - %sDomain %s will expire in %d days (%s).%s", prefix, flagDomain, days, expDate, info))
 	}
 
-	// Already expired
 	if days < flagCritDays {
 		die(STATE_CRITICAL, fmt.Sprintf("CRITICAL - %sDomain %s expired %d days ago (%s).%s", prefix, flagDomain, -days, expDate, info))
 	}
@@ -674,4 +674,3 @@ func main() {
 	}
 	die(STATE_OK, fmt.Sprintf("OK - %sDomain %s expired %d days ago (%s).%s", prefix, flagDomain, -days, expDate, info))
 }
-
