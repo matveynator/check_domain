@@ -1,5 +1,6 @@
 // check_domain: Nagios/Icinga plugin to check domain expiration using RDAP with WHOIS fallback.
 // Exit codes: 0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN.
+
 package main
 
 import (
